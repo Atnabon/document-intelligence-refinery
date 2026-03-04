@@ -85,6 +85,10 @@ class LedgerEntry(BaseModel):
         default_factory=list,
         description="Any errors or warnings during extraction.",
     )
+    needs_human_review: bool = Field(
+        default=False,
+        description="Flagged True when all strategies returned confidence below threshold.",
+    )
 
 
 class ExtractedDocument(BaseModel):

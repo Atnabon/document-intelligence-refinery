@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PageNode(BaseModel):
@@ -35,6 +35,16 @@ class PageNode(BaseModel):
         default=None,
         description="LLM-generated summary of this section's content.",
     )
+
+    @model_validator(mode="after")
+    def page_end_gte_page_start(self) -> "PageNode":
+        """Enforce that page_end is not before page_start."""
+        if self.page_end < self.page_start:
+            raise ValueError(
+                f"page_end ({self.page_end}) must be >= page_start ({self.page_start})"
+            )
+        return self
+
     children: List[PageNode] = Field(
         default_factory=list,
         description="Child sections.",

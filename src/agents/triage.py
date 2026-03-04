@@ -9,6 +9,10 @@ Responsibilities:
 The Triage Agent operates WITHOUT extracting content — it analyses PDF metadata,
 samples pages, and uses heuristics + optional LLM classification to produce a
 DocumentProfile quickly and cheaply.
+
+Domain classification is implemented as a swappable strategy: swap in a
+VLMDomainClassifier (or any DomainClassifier subclass) without touching this
+agent's core logic.
 """
 
 from __future__ import annotations
@@ -17,9 +21,10 @@ import hashlib
 import logging
 import os
 import re
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 import fitz  # PyMuPDF
 
@@ -34,6 +39,165 @@ from src.models.document_profile import (
 logger = logging.getLogger(__name__)
 
 
+# ── Domain Classifier Strategy Interface ─────────────────────────────────────
+
+class DomainClassifier(ABC):
+    """Abstract base for domain classification strategies.
+
+    Implement this interface to swap in a VLM-based classifier, an embedding
+    classifier, or any other approach — without modifying TriageAgent.
+    """
+
+    @abstractmethod
+    def classify(self, sample_text: str, filename: str) -> DomainHint:
+        """Classify the document domain from sample text and filename.
+
+        Args:
+            sample_text: Text sampled from the first several pages.
+            filename: Original filename (strong signal for some domains).
+
+        Returns:
+            DomainHint enum value.
+        """
+        ...
+
+
+class KeywordDomainClassifier(DomainClassifier):
+    """Keyword-scoring domain classifier (default, zero-cost).
+
+    Scores each domain by counting keyword hits in the sample text and
+    applying filename bonuses. Domain keyword lists are loaded from the
+    externalized configuration at construction time so new domains can be
+    onboarded purely by editing extraction_rules.yaml.
+    """
+
+    # Default keyword lists (used when config is not provided)
+    _DEFAULT_KEYWORDS: Dict[DomainHint, List[str]] = {
+        DomainHint.FINANCIAL_REPORT: [
+            "annual report", "financial statement", "balance sheet",
+            "income statement", "profit and loss", "total assets",
+            "shareholders", "dividend", "fiscal year", "revenue",
+            "net income", "bank", "capital adequacy",
+        ],
+        DomainHint.LEGAL_AUDIT: [
+            "auditor", "audit report", "independent auditor",
+            "legal opinion", "compliance", "regulation",
+            "proclamation", "court", "judgment",
+        ],
+        DomainHint.TECHNICAL_ASSESSMENT: [
+            "assessment", "survey", "methodology", "findings",
+            "recommendation", "evaluation", "implementation",
+            "performance", "indicator", "framework",
+        ],
+        DomainHint.STRUCTURED_DATA: [
+            "tax expenditure", "import tax", "customs",
+            "tariff", "consumer price index", "CPI",
+            "statistical", "fiscal data", "expenditure",
+        ],
+    }
+
+    _DEFAULT_FILENAME_PATTERNS: Dict[DomainHint, List[str]] = {
+        DomainHint.FINANCIAL_REPORT: ["annual", "report"],
+        DomainHint.LEGAL_AUDIT: ["audit"],
+        DomainHint.TECHNICAL_ASSESSMENT: ["assessment", "survey"],
+        DomainHint.STRUCTURED_DATA: ["tax", "expenditure", "cpi"],
+    }
+
+    def __init__(self, config: Optional[dict] = None) -> None:
+        """Load keyword lists from config or fall back to defaults."""
+        domain_cfg = (config or {}).get("domain_classification", {})
+
+        self._keywords: Dict[DomainHint, List[str]] = {}
+        self._filename_patterns: Dict[DomainHint, List[str]] = {}
+
+        domain_map = {
+            "financial_report": DomainHint.FINANCIAL_REPORT,
+            "legal_audit": DomainHint.LEGAL_AUDIT,
+            "technical_assessment": DomainHint.TECHNICAL_ASSESSMENT,
+            "structured_data": DomainHint.STRUCTURED_DATA,
+        }
+
+        for key, hint in domain_map.items():
+            if key in domain_cfg:
+                self._keywords[hint] = domain_cfg[key].get(
+                    "keywords", self._DEFAULT_KEYWORDS[hint]
+                )
+                self._filename_patterns[hint] = domain_cfg[key].get(
+                    "filename_patterns", self._DEFAULT_FILENAME_PATTERNS[hint]
+                )
+            else:
+                self._keywords[hint] = self._DEFAULT_KEYWORDS[hint]
+                self._filename_patterns[hint] = self._DEFAULT_FILENAME_PATTERNS[hint]
+
+    def classify(self, sample_text: str, filename: str) -> DomainHint:
+        text_lower = sample_text.lower()
+        filename_lower = filename.lower()
+
+        scores: Dict[DomainHint, int] = {hint: 0 for hint in self._keywords}
+
+        # Keyword scoring from content
+        for hint, keywords in self._keywords.items():
+            for kw in keywords:
+                if kw.lower() in text_lower:
+                    scores[hint] += 1
+
+        # Filename bonus (strong signal)
+        for hint, patterns in self._filename_patterns.items():
+            for pattern in patterns:
+                if pattern.lower() in filename_lower:
+                    scores[hint] += 3
+
+        max_score = max(scores.values())
+        if max_score == 0:
+            return DomainHint.UNKNOWN
+
+        return max(scores, key=scores.get)
+
+
+class VLMDomainClassifier(DomainClassifier):
+    """VLM-backed domain classifier — drop-in replacement for KeywordDomainClassifier.
+
+    Pass an instance of this class to TriageAgent to upgrade domain classification
+    to GPT-4o / Gemini without any changes to TriageAgent code.
+
+    Usage:
+        triage = TriageAgent(domain_classifier=VLMDomainClassifier())
+    """
+
+    def classify(self, sample_text: str, filename: str) -> DomainHint:
+        """Classify using a VLM prompt (requires OPENAI_API_KEY)."""
+        try:
+            from openai import OpenAI
+
+            client = OpenAI()
+            prompt = (
+                "Classify the document domain into exactly one of: "
+                "financial_report, legal_audit, technical_assessment, structured_data, unknown.\n\n"
+                f"Filename: {filename}\n\nSample text:\n{sample_text[:2000]}\n\n"
+                "Respond with only the domain label, nothing else."
+            )
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=20,
+                temperature=0.0,
+            )
+            label = response.choices[0].message.content.strip().lower()
+            domain_map = {
+                "financial_report": DomainHint.FINANCIAL_REPORT,
+                "legal_audit": DomainHint.LEGAL_AUDIT,
+                "technical_assessment": DomainHint.TECHNICAL_ASSESSMENT,
+                "structured_data": DomainHint.STRUCTURED_DATA,
+            }
+            return domain_map.get(label, DomainHint.UNKNOWN)
+        except Exception as e:
+            logger.warning("VLMDomainClassifier failed, returning UNKNOWN: %s", e)
+            return DomainHint.UNKNOWN
+
+
+# ── Triage Agent ──────────────────────────────────────────────────────────────
+
+
 class TriageAgent:
     """Classifies incoming PDFs and produces a DocumentProfile.
 
@@ -41,50 +205,60 @@ class TriageAgent:
     - Fast: should complete triage in < 2 seconds for a 200-page PDF.
     - Cheap: no LLM calls in the default path; LLM used only for ambiguous cases.
     - Deterministic: same document always produces the same profile.
+
+    The domain classifier is injected as a strategy: pass a VLMDomainClassifier
+    instance to upgrade classification without modifying this class.
     """
 
-    # ── Thresholds (configurable via extraction_rules.yaml) ────────────
-    SCANNED_TEXT_THRESHOLD: int = 50  # chars per page below which → scanned
-    SCANNED_RATIO_THRESHOLD: float = 0.5  # above this → SCANNED_IMAGE
-    MIXED_RATIO_LOWER: float = 0.1  # below this → NATIVE_DIGITAL
-    TABLE_KEYWORD_THRESHOLD: int = 3  # keyword hits to flag has_tables
-    COMPLEX_TABLE_THRESHOLD: int = 5  # tables count for COMPLEX layout
+    # ── Defaults (overridden by extraction_rules.yaml via config) ──────
+    SCANNED_TEXT_THRESHOLD: int = 50
+    SCANNED_RATIO_THRESHOLD: float = 0.5
+    MIXED_RATIO_LOWER: float = 0.1
+    TABLE_KEYWORD_THRESHOLD: int = 3
+    COMPLEX_TABLE_THRESHOLD: int = 5
 
-    # Keywords that hint at domain classification
-    FINANCIAL_KEYWORDS = [
-        "annual report", "financial statement", "balance sheet",
-        "income statement", "profit and loss", "total assets",
-        "shareholders", "dividend", "fiscal year", "revenue",
-        "net income", "bank", "capital adequacy",
-    ]
-    LEGAL_KEYWORDS = [
-        "auditor", "audit report", "independent auditor",
-        "legal opinion", "compliance", "regulation",
-        "proclamation", "court", "judgment",
-    ]
-    TECHNICAL_KEYWORDS = [
-        "assessment", "survey", "methodology", "findings",
-        "recommendation", "evaluation", "implementation",
-        "performance", "indicator", "framework",
-    ]
-    STRUCTURED_DATA_KEYWORDS = [
-        "tax expenditure", "import tax", "customs",
-        "tariff", "consumer price index", "CPI",
-        "statistical", "fiscal data", "expenditure",
-    ]
     TABLE_KEYWORDS = [
         "table", "total", "amount", "percentage", "%",
         "sum", "average", "row", "column",
     ]
 
-    def __init__(self, config: Optional[dict] = None):
-        """Initialize with optional configuration overrides."""
-        if config:
-            self.SCANNED_TEXT_THRESHOLD = config.get(
-                "scanned_text_threshold", self.SCANNED_TEXT_THRESHOLD
-            )
-            self.SCANNED_RATIO_THRESHOLD = config.get(
-                "scanned_ratio_threshold", self.SCANNED_RATIO_THRESHOLD
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        domain_classifier: Optional[DomainClassifier] = None,
+    ) -> None:
+        """Initialize with optional configuration overrides and domain classifier.
+
+        Args:
+            config: Dictionary from extraction_rules.yaml (triage section).
+            domain_classifier: A DomainClassifier implementation. Defaults to
+                               KeywordDomainClassifier loaded from config.
+        """
+        triage_cfg = (config or {}).get("triage", config or {})
+
+        self.SCANNED_TEXT_THRESHOLD = triage_cfg.get(
+            "scanned_text_threshold", self.SCANNED_TEXT_THRESHOLD
+        )
+        self.SCANNED_RATIO_THRESHOLD = triage_cfg.get(
+            "scanned_ratio_threshold", self.SCANNED_RATIO_THRESHOLD
+        )
+        self.MIXED_RATIO_LOWER = triage_cfg.get(
+            "mixed_ratio_lower", self.MIXED_RATIO_LOWER
+        )
+        self.TABLE_KEYWORD_THRESHOLD = triage_cfg.get(
+            "table_keyword_threshold", self.TABLE_KEYWORD_THRESHOLD
+        )
+        self.COMPLEX_TABLE_THRESHOLD = triage_cfg.get(
+            "complex_table_threshold", self.COMPLEX_TABLE_THRESHOLD
+        )
+
+        # Domain classifier strategy — inject VLMDomainClassifier to upgrade
+        if domain_classifier is not None:
+            self._domain_classifier = domain_classifier
+        else:
+            self._domain_classifier = KeywordDomainClassifier(
+                config=triage_cfg.get("domain_classification")
+                and {"domain_classification": triage_cfg["domain_classification"]}
             )
 
     def profile_document(self, pdf_path: str | Path) -> DocumentProfile:
@@ -123,7 +297,7 @@ class TriageAgent:
 
         # ── Phase 3: Domain Classification ────────────────────────────
         sample_text = self._extract_sample_text(doc)
-        domain_hint = self._classify_domain(sample_text, pdf_path.name)
+        domain_hint = self._domain_classifier.classify(sample_text, pdf_path.name)
 
         # ── Phase 4: Strategy Selection ───────────────────────────────
         strategy, rationale, cost = self._select_strategy(
@@ -268,53 +442,6 @@ class TriageAgent:
             if char_count >= max_chars:
                 break
         return "\n".join(texts)[:max_chars]
-
-    def _classify_domain(self, sample_text: str, filename: str) -> DomainHint:
-        """Classify document domain using keyword matching.
-
-        Uses a weighted scoring system across domain keyword sets.
-        Filename is also considered as a strong signal.
-        """
-        text_lower = sample_text.lower()
-        filename_lower = filename.lower()
-
-        scores = {
-            DomainHint.FINANCIAL_REPORT: 0,
-            DomainHint.LEGAL_AUDIT: 0,
-            DomainHint.TECHNICAL_ASSESSMENT: 0,
-            DomainHint.STRUCTURED_DATA: 0,
-        }
-
-        # Score from text content
-        for kw in self.FINANCIAL_KEYWORDS:
-            if kw in text_lower:
-                scores[DomainHint.FINANCIAL_REPORT] += 1
-        for kw in self.LEGAL_KEYWORDS:
-            if kw in text_lower:
-                scores[DomainHint.LEGAL_AUDIT] += 1
-        for kw in self.TECHNICAL_KEYWORDS:
-            if kw in text_lower:
-                scores[DomainHint.TECHNICAL_ASSESSMENT] += 1
-        for kw in self.STRUCTURED_DATA_KEYWORDS:
-            if kw in text_lower:
-                scores[DomainHint.STRUCTURED_DATA] += 1
-
-        # Filename bonus (strong signal)
-        if "annual" in filename_lower or "report" in filename_lower:
-            scores[DomainHint.FINANCIAL_REPORT] += 3
-        if "audit" in filename_lower:
-            scores[DomainHint.LEGAL_AUDIT] += 3
-        if "assessment" in filename_lower or "survey" in filename_lower:
-            scores[DomainHint.TECHNICAL_ASSESSMENT] += 3
-        if "tax" in filename_lower or "expenditure" in filename_lower or "cpi" in filename_lower:
-            scores[DomainHint.STRUCTURED_DATA] += 3
-
-        max_score = max(scores.values())
-        if max_score == 0:
-            return DomainHint.UNKNOWN
-
-        # Return highest-scoring domain
-        return max(scores, key=scores.get)
 
     def _select_strategy(
         self,

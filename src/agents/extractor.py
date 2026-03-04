@@ -61,22 +61,30 @@ class ExtractionRouter:
     ]
 
     def __init__(self, config: Optional[dict] = None):
-        """Initialize with strategy instances and optional config."""
+        """Initialize with strategy instances and optional config.
+
+        Args:
+            config: Full pipeline config dict (from extraction_rules.yaml).
+                    Reads from both ``extraction`` and ``vlm`` sections.
+        """
+        extraction_cfg = (config or {}).get("extraction", config or {})
+        vlm_cfg = (config or {}).get("vlm", {})
+        vlm_budget_cap = vlm_cfg.get("budget_cap_usd")
+
         self.strategies: Dict[str, BaseExtractor] = {
             "fast_text": FastTextExtractor(),
             "layout_aware": LayoutExtractor(),
-            "vision_model": VisionExtractor(),
+            "vision_model": VisionExtractor(budget_cap_usd=vlm_budget_cap),
         }
 
-        if config:
-            self.CONFIDENCE_ESCALATION_THRESHOLD = config.get(
-                "confidence_escalation_threshold",
-                self.CONFIDENCE_ESCALATION_THRESHOLD,
-            )
-            self.MAX_COST_PER_DOCUMENT_USD = config.get(
-                "max_cost_per_document_usd",
-                self.MAX_COST_PER_DOCUMENT_USD,
-            )
+        self.CONFIDENCE_ESCALATION_THRESHOLD = extraction_cfg.get(
+            "confidence_escalation_threshold",
+            self.CONFIDENCE_ESCALATION_THRESHOLD,
+        )
+        self.MAX_COST_PER_DOCUMENT_USD = extraction_cfg.get(
+            "max_cost_per_document_usd",
+            self.MAX_COST_PER_DOCUMENT_USD,
+        )
 
     def extract_document(
         self,
@@ -172,6 +180,21 @@ class ExtractionRouter:
 
             current_strategy_idx += 1
 
+        # ── Graceful Degradation ──────────────────────────────────────
+        # If all strategies have been exhausted and confidence is still below
+        # threshold, flag the document for human review rather than silently
+        # passing potentially unreliable data downstream.
+        needs_human_review = False
+        if avg_confidence < self.CONFIDENCE_ESCALATION_THRESHOLD:
+            needs_human_review = True
+            review_warning = (
+                f"All strategies exhausted. Final confidence {avg_confidence:.3f} "
+                f"is below threshold {self.CONFIDENCE_ESCALATION_THRESHOLD:.2f}. "
+                f"Document flagged for human review."
+            )
+            logger.warning(review_warning)
+            errors.append(review_warning)
+
         # ── Build Result ──────────────────────────────────────────────
         elapsed = time.time() - start_time
         low_conf_count = sum(
@@ -199,6 +222,7 @@ class ExtractionRouter:
             escalated=escalation_count > 0,
             processed_at=datetime.utcnow(),
             errors=errors,
+            needs_human_review=needs_human_review,
         )
 
         return ExtractedDocument(
