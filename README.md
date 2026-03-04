@@ -2,8 +2,6 @@
 
 **Agentic Pipeline for Unstructured Document Extraction at Enterprise Scale**
 
-> TRP1 Challenge — Week 3 | FDE Program
-
 ## Overview
 
 The Document Intelligence Refinery is a classification-aware, spatially-indexed, provenance-preserving extraction system that processes heterogeneous PDF documents into structured, queryable data. It handles four document classes:
