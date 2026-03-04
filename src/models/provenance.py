@@ -56,6 +56,9 @@ class ProvenanceChain(BaseModel):
     document_id: str = Field(
         ..., description="ID of the source document."
     )
+    document_name: str = Field(
+        ..., description="Human-readable filename of the source document."
+    )
     claim: str = Field(
         ..., description="The extracted fact or answer being cited."
     )

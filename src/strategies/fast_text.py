@@ -6,6 +6,11 @@ extraction with reading-order preservation.
 
 Best for: Simple, single-column, text-dominant native-digital PDFs.
 Cost: ~$0.0001 per page (local processing only).
+
+Confidence scoring uses multiple signals per page:
+  - Character density   (chars / page area)  — high density → high confidence
+  - Image area ratio    (image px / page px) — high image coverage → lower confidence
+  - Font metadata       (fonts present)      — rich font info → higher confidence
 """
 
 from __future__ import annotations
@@ -38,7 +43,22 @@ class FastTextExtractor(BaseExtractor):
     - Cannot handle tables (extracts as broken text)
     - No layout understanding
     - Useless for scanned documents
+
+    Confidence model (multi-signal, computed per page):
+    - Base: 0.60
+    - +0.15 if character density >= threshold (text-rich page)
+    - +0.15 if image area ratio is low (<10% of page area)
+    - +0.10 if font metadata is present (font names embedded)
+    - Max confidence: 1.0
     """
+
+    # ── Confidence signal thresholds ──────────────────────────────────
+    CHAR_DENSITY_THRESHOLD: float = 0.05   # chars / pt² (above → text-rich)
+    IMAGE_AREA_LOW_THRESHOLD: float = 0.10  # image coverage below which full bonus
+    CONFIDENCE_BASE: float = 0.60
+    CONFIDENCE_CHAR_DENSITY_BONUS: float = 0.15
+    CONFIDENCE_LOW_IMAGE_BONUS: float = 0.15
+    CONFIDENCE_FONT_METADATA_BONUS: float = 0.10
 
     def name(self) -> str:
         return "fast_text"
@@ -56,6 +76,7 @@ class FastTextExtractor(BaseExtractor):
 
         Each text block detected by PyMuPDF becomes one LDU. Blocks are
         classified as headings, paragraphs, or other based on heuristics.
+        Per-block confidence is computed from multi-signal page analysis.
         """
         pdf_path = Path(pdf_path)
         doc = fitz.open(str(pdf_path))
@@ -71,6 +92,10 @@ class FastTextExtractor(BaseExtractor):
 
             page = doc[page_idx]
             page_number = page_idx + 1
+
+            # ── Multi-signal confidence for this page ─────────────────
+            page_confidence = self._compute_page_confidence(page)
+
             blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
 
             seq = 0
@@ -119,7 +144,7 @@ class FastTextExtractor(BaseExtractor):
                     content_hash=content_hash,
                     section_heading=None,  # populated later by indexer
                     extraction_strategy=self.name(),
-                    confidence=0.85,  # base confidence for direct text extraction
+                    confidence=page_confidence,
                     sequence_index=seq,
                 )
                 ldus.append(ldu)
@@ -132,6 +157,61 @@ class FastTextExtractor(BaseExtractor):
             pdf_path.name,
         )
         return ldus
+
+    def _compute_page_confidence(self, page: fitz.Page) -> float:
+        """Compute multi-signal confidence score for a page.
+
+        Signals:
+          1. Character density  — chars per unit of page area
+          2. Image area ratio   — fraction of page covered by images
+          3. Font metadata      — whether font names are embedded
+
+        Returns a float in [0, 1].
+        """
+        page_area = max(page.rect.width * page.rect.height, 1.0)
+        confidence = self.CONFIDENCE_BASE
+
+        # ── Signal 1: Character density ───────────────────────────────
+        raw_text = page.get_text("text")
+        char_count = len(raw_text.strip())
+        char_density = char_count / page_area
+
+        if char_density >= self.CHAR_DENSITY_THRESHOLD:
+            confidence += self.CONFIDENCE_CHAR_DENSITY_BONUS
+
+        # ── Signal 2: Image area ratio ────────────────────────────────
+        image_area = 0.0
+        for img in page.get_images(full=True):
+            xref = img[0]
+            try:
+                rects = page.get_image_rects(xref)
+                for rect in rects:
+                    image_area += rect.width * rect.height
+            except Exception:
+                pass
+
+        image_ratio = image_area / page_area
+        if image_ratio < self.IMAGE_AREA_LOW_THRESHOLD:
+            confidence += self.CONFIDENCE_LOW_IMAGE_BONUS
+
+        # ── Signal 3: Font metadata presence ─────────────────────────
+        font_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        has_font_metadata = False
+        for block in font_dict.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    if span.get("font", ""):
+                        has_font_metadata = True
+                        break
+                if has_font_metadata:
+                    break
+            if has_font_metadata:
+                break
+
+        if has_font_metadata:
+            confidence += self.CONFIDENCE_FONT_METADATA_BONUS
+
+        return round(min(confidence, 1.0), 4)
 
     @staticmethod
     def _classify_block(text: str, block: dict) -> LDUType:
