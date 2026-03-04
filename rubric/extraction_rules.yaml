@@ -1,0 +1,158 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Document Intelligence Refinery — Extraction Rules Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# This file externalizes all chunking rules, extraction thresholds, and
+# strategy parameters. To onboard a new document type, modify THIS file —
+# not the source code.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Triage Agent Configuration ────────────────────────────────────────────
+triage:
+  # Characters per page below which the page is considered scanned
+  scanned_text_threshold: 50
+
+  # Fraction of pages that must be scanned to classify document as SCANNED_IMAGE
+  scanned_ratio_threshold: 0.5
+
+  # Keyword-based domain classification weights
+  domain_classification:
+    financial_report:
+      keywords:
+        - "annual report"
+        - "financial statement"
+        - "balance sheet"
+        - "income statement"
+        - "profit and loss"
+        - "total assets"
+        - "shareholders"
+        - "dividend"
+        - "fiscal year"
+        - "revenue"
+        - "net income"
+        - "bank"
+        - "capital adequacy"
+      filename_patterns:
+        - "annual"
+        - "report"
+
+    legal_audit:
+      keywords:
+        - "auditor"
+        - "audit report"
+        - "independent auditor"
+        - "legal opinion"
+        - "compliance"
+        - "regulation"
+        - "proclamation"
+      filename_patterns:
+        - "audit"
+
+    technical_assessment:
+      keywords:
+        - "assessment"
+        - "survey"
+        - "methodology"
+        - "findings"
+        - "recommendation"
+        - "evaluation"
+        - "implementation"
+        - "performance"
+        - "indicator"
+        - "framework"
+      filename_patterns:
+        - "assessment"
+        - "survey"
+
+    structured_data:
+      keywords:
+        - "tax expenditure"
+        - "import tax"
+        - "customs"
+        - "tariff"
+        - "consumer price index"
+        - "CPI"
+        - "statistical"
+        - "fiscal data"
+        - "expenditure"
+      filename_patterns:
+        - "tax"
+        - "expenditure"
+        - "cpi"
+
+# ── Extraction Strategy Configuration ─────────────────────────────────────
+extraction:
+  # Average confidence below this triggers escalation to next strategy
+  confidence_escalation_threshold: 0.70
+
+  # Maximum total cost allowed per document (USD)
+  max_cost_per_document_usd: 5.0
+
+  # LDUs below this confidence are flagged as low-confidence
+  low_confidence_threshold: 0.60
+
+  # Per-strategy cost model (USD per page)
+  cost_per_page:
+    fast_text: 0.0001
+    layout_aware: 0.001
+    vision_model: 0.01
+
+  # Strategy selection decision tree
+  strategy_routing:
+    # Scanned documents always use VLM
+    scanned_image: "vision_model"
+    # Mixed documents start with layout-aware
+    mixed: "layout_aware"
+    # Complex layouts with tables use layout-aware
+    complex_with_tables: "layout_aware"
+    # Financial/structured data domains prefer layout-aware for tables
+    financial_moderate: "layout_aware"
+    # Default for simple native digital
+    default: "fast_text"
+
+# ── Chunking Constitution (LDU Rules) ────────────────────────────────────
+chunking:
+  rules:
+    # Rule 1: Table Integrity — never split a table across chunks
+    - name: "table_integrity"
+      description: "A table is always a single LDU. Never split table rows across chunks."
+      enforcement: "strict"
+
+    # Rule 2: Caption Binding — figures/tables and their captions are one unit
+    - name: "caption_binding"
+      description: "A figure or table caption must be in the same LDU as its parent element."
+      enforcement: "strict"
+
+    # Rule 3: Section Coherence — respect heading boundaries
+    - name: "section_coherence"
+      description: "An LDU should not span across section headings. New heading = new LDU."
+      enforcement: "strict"
+
+    # Rule 4: Minimum Context — paragraphs should have enough context
+    - name: "minimum_context"
+      description: "LDUs should contain at least 50 characters of meaningful text."
+      min_chars: 50
+      enforcement: "advisory"
+
+    # Rule 5: Maximum Size — prevent overly large chunks
+    - name: "maximum_size"
+      description: "LDUs should not exceed 2000 characters. Split at sentence boundaries."
+      max_chars: 2000
+      enforcement: "advisory"
+
+  # Overlap between consecutive paragraph LDUs (for RAG context)
+  paragraph_overlap_chars: 100
+
+# ── VLM Configuration ────────────────────────────────────────────────────
+vlm:
+  provider: "openai"  # or "google"
+  model: "gpt-4o"
+  render_dpi: 200
+  max_tokens: 4096
+  temperature: 0.0
+  max_retries: 3
+
+# ── Output Configuration ─────────────────────────────────────────────────
+output:
+  profiles_dir: ".refinery/profiles"
+  ledger_path: ".refinery/extraction_ledger.jsonl"
+  pageindex_dir: ".refinery/pageindex"
