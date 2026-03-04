@@ -47,6 +47,7 @@ class VisionExtractor(BaseExtractor):
     DEFAULT_MODEL = "gpt-4o"
     MAX_RETRIES = 3
     RENDER_DPI = 200  # DPI for page rendering
+    DEFAULT_BUDGET_CAP_USD = 2.0  # Halt processing when this amount is exceeded
 
     EXTRACTION_PROMPT = """Analyze this document page image and extract all content with structure preserved.
 
@@ -60,10 +61,26 @@ For each content element, return a JSON array of objects with these fields:
 Preserve all numbers exactly as they appear. Do not infer or calculate values.
 Return ONLY valid JSON array, no other text."""
 
-    def __init__(self, provider: str | None = None, model: str | None = None):
-        """Initialize with VLM provider configuration."""
+    def __init__(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        budget_cap_usd: float | None = None,
+    ):
+        """Initialize with VLM provider configuration and optional budget cap.
+
+        Args:
+            provider: VLM provider ("openai" or "google"). Reads VLM_PROVIDER env var.
+            model: Model name. Reads VLM_MODEL env var.
+            budget_cap_usd: Hard cost cap in USD. Processing halts when exceeded.
+                            Defaults to DEFAULT_BUDGET_CAP_USD.
+        """
         self.provider = provider or os.getenv("VLM_PROVIDER", self.DEFAULT_PROVIDER)
         self.model = model or os.getenv("VLM_MODEL", self.DEFAULT_MODEL)
+        self.budget_cap_usd = (
+            budget_cap_usd if budget_cap_usd is not None
+            else self.DEFAULT_BUDGET_CAP_USD
+        )
 
     def name(self) -> str:
         return "vision_model"
@@ -79,6 +96,7 @@ Return ONLY valid JSON array, no other text."""
     ) -> List[LDU]:
         """Extract content by rendering pages as images and sending to VLM.
 
+        Processing halts when cumulative cost exceeds budget_cap_usd.
         Falls back to OCR-based extraction if VLM is unavailable.
         """
         pdf_path = Path(pdf_path)
@@ -86,10 +104,23 @@ Return ONLY valid JSON array, no other text."""
         ldus: List[LDU] = []
 
         page_indices = [p - 1 for p in pages] if pages else range(len(doc))
+        cumulative_cost = 0.0
+        cost_per_page = self.cost_per_page()
 
         for page_idx in page_indices:
             if page_idx < 0 or page_idx >= len(doc):
                 continue
+
+            # ── Budget cap enforcement ────────────────────────────────
+            if cumulative_cost + cost_per_page > self.budget_cap_usd:
+                logger.warning(
+                    "VisionExtractor: Budget cap $%.2f reached after %d pages "
+                    "(cumulative cost $%.4f). Halting further VLM processing.",
+                    self.budget_cap_usd,
+                    page_idx,
+                    cumulative_cost,
+                )
+                break
 
             page = doc[page_idx]
             page_number = page_idx + 1
@@ -99,13 +130,14 @@ Return ONLY valid JSON array, no other text."""
                     profile, page, page_number, doc
                 )
                 ldus.extend(page_ldus)
+                cumulative_cost += cost_per_page
             except Exception as e:
                 logger.warning(
                     "VLM extraction failed for page %d, falling back to OCR: %s",
                     page_number,
                     str(e),
                 )
-                # Fallback: try basic OCR via PyMuPDF
+                # Fallback: try basic OCR via PyMuPDF (no additional cost)
                 page_ldus = self._extract_page_ocr_fallback(
                     profile, page, page_number
                 )
@@ -113,9 +145,11 @@ Return ONLY valid JSON array, no other text."""
 
         doc.close()
         logger.info(
-            "VisionExtractor: Extracted %d LDUs from %s",
+            "VisionExtractor: Extracted %d LDUs from %s (cost $%.4f / cap $%.2f)",
             len(ldus),
             pdf_path.name,
+            cumulative_cost,
+            self.budget_cap_usd,
         )
         return ldus
 

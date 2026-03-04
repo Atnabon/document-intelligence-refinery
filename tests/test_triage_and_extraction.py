@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agents.triage import TriageAgent
+from src.agents.triage import TriageAgent, KeywordDomainClassifier
 from src.models.document_profile import (
     DocumentProfile,
     DomainHint,
@@ -33,13 +33,13 @@ class TestTriageAgentDomainClassification:
             "Total assets reached ETB 2.1 trillion. "
             "Net income increased by 15%. Balance sheet shows strong capital adequacy."
         )
-        result = self.agent._classify_domain(text, "some_document.pdf")
+        result = self.agent._domain_classifier.classify(text, "some_document.pdf")
         assert result == DomainHint.FINANCIAL_REPORT
 
     def test_classify_financial_report_by_filename(self):
         """Filename containing 'annual report' should boost financial classification."""
         text = "Some generic text about the organization."
-        result = self.agent._classify_domain(text, "CBE Annual Report 2023-24.pdf")
+        result = self.agent._domain_classifier.classify(text, "CBE Annual Report 2023-24.pdf")
         assert result == DomainHint.FINANCIAL_REPORT
 
     def test_classify_legal_audit_by_content(self):
@@ -49,13 +49,13 @@ class TestTriageAgentDomainClassification:
             "financial statements. The audit report covers compliance with "
             "applicable regulations and proclamation requirements."
         )
-        result = self.agent._classify_domain(text, "document.pdf")
+        result = self.agent._domain_classifier.classify(text, "document.pdf")
         assert result == DomainHint.LEGAL_AUDIT
 
     def test_classify_legal_audit_by_filename(self):
         """Filename containing 'audit' should boost legal/audit classification."""
         text = "Independent auditor opinion on compliance and regulation."
-        result = self.agent._classify_domain(text, "Audit Report - 2023.pdf")
+        result = self.agent._domain_classifier.classify(text, "Audit Report - 2023.pdf")
         assert result == DomainHint.LEGAL_AUDIT
 
     def test_classify_technical_assessment(self):
@@ -65,7 +65,7 @@ class TestTriageAgentDomainClassification:
             "This survey evaluates the implementation of performance indicators. "
             "The methodology uses a comprehensive evaluation framework."
         )
-        result = self.agent._classify_domain(text, "fta_performance_survey.pdf")
+        result = self.agent._domain_classifier.classify(text, "fta_performance_survey.pdf")
         assert result == DomainHint.TECHNICAL_ASSESSMENT
 
     def test_classify_structured_data(self):
@@ -74,14 +74,20 @@ class TestTriageAgentDomainClassification:
             "Tax Expenditure Report covering import tax data for Ethiopia. "
             "Consumer Price Index analysis. Customs tariff expenditure breakdown."
         )
-        result = self.agent._classify_domain(text, "tax_expenditure_ethiopia.pdf")
+        result = self.agent._domain_classifier.classify(text, "tax_expenditure_ethiopia.pdf")
         assert result == DomainHint.STRUCTURED_DATA
 
     def test_classify_unknown_domain(self):
         """Text with no domain keywords should yield UNKNOWN."""
         text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
-        result = self.agent._classify_domain(text, "random.pdf")
+        result = self.agent._domain_classifier.classify(text, "random.pdf")
         assert result == DomainHint.UNKNOWN
+
+    def test_keyword_classifier_is_swappable(self):
+        """TriageAgent should accept any DomainClassifier implementation."""
+        custom = KeywordDomainClassifier()
+        agent = TriageAgent(domain_classifier=custom)
+        assert agent._domain_classifier is custom
 
 
 class TestTriageAgentStrategySelection:
@@ -269,6 +275,7 @@ class TestPydanticModels:
 
         chain = ProvenanceChain(
             document_id="test_doc",
+            document_name="test_doc.pdf",
             claim="Revenue increased by 15%",
             citations=[
                 SourceCitation(
