@@ -72,6 +72,12 @@ def process_document(
     logger.info("Time: %.2fs", result.metrics.extraction_time_seconds)
     if result.metrics.escalation_count > 0:
         logger.info("Escalations: %d", result.metrics.escalation_count)
+    if result.ledger_entry.needs_human_review:
+        logger.warning(
+            "HUMAN REVIEW REQUIRED: %s — confidence %.3f below threshold",
+            pdf_path.name,
+            result.metrics.average_confidence,
+        )
 
 
 def main():
@@ -115,8 +121,8 @@ def main():
     config = load_config(config_path)
 
     # Initialize agents
-    triage_agent = TriageAgent(config=config.get("triage", {}))
-    router = ExtractionRouter(config=config.get("extraction", {}))
+    triage_agent = TriageAgent(config=config)
+    router = ExtractionRouter(config=config)
 
     # Collect PDF files
     if input_path.is_file() and input_path.suffix.lower() == ".pdf":

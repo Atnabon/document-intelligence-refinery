@@ -14,6 +14,15 @@ triage:
   # Fraction of pages that must be scanned to classify document as SCANNED_IMAGE
   scanned_ratio_threshold: 0.5
 
+  # Fraction of scanned pages below which document is purely NATIVE_DIGITAL
+  mixed_ratio_lower: 0.1
+
+  # Number of table-keyword hits on a page to flag it as containing a table
+  table_keyword_threshold: 3
+
+  # Minimum number of table-containing pages (in sample) to classify as COMPLEX layout
+  complex_table_threshold: 5
+
   # Keyword-based domain classification weights
   domain_classification:
     financial_report:
@@ -150,6 +159,8 @@ vlm:
   max_tokens: 4096
   temperature: 0.0
   max_retries: 3
+  # Hard budget cap for Strategy C: processing halts when this USD amount is reached
+  budget_cap_usd: 2.0
 
 # ── Output Configuration ─────────────────────────────────────────────────
 output:
