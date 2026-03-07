@@ -35,14 +35,27 @@ PDF Input → [1. Triage] → [2. Extraction] → [3. Chunking] → [4. Indexing
 - Confidence-gated escalation: auto-upgrades if quality is low
 - Cost budget guard prevents runaway API costs
 
-### Stage 3–5: (Final submission)
-- Semantic chunking, PageIndex tree building, and query agent
+### Stage 3: Chunking Engine
+- Splits LDUs into semantically coherent chunks
+- 5 validation rules: table integrity, caption binding, section coherence, minimum context, maximum size
+- Config-driven via `extraction_rules.yaml` (min/max chars, overlap)
+
+### Stage 4: PageIndex Builder
+- Constructs a hierarchical section tree from document headings
+- Infers heading levels via numbered patterns, ALL CAPS, and title-case heuristics
+- LLM-powered section summaries with heuristic fallback
+
+### Stage 5: Query Agent
+- 3 retrieval tools: `pageindex_navigate`, `semantic_search`, `structured_query`
+- Vector store (ChromaDB) with keyword fallback
+- FactTable (SQLite) for numeric queries with unit-aware parsing
+- Audit mode: verifies claims against source LDUs with provenance chains
 
 ## Quick Start
 
 ### Prerequisites
 - Python 3.10+
-- pip or uv
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 ### Installation
 
@@ -51,12 +64,11 @@ PDF Input → [1. Triage] → [2. Extraction] → [3. Chunking] → [4. Indexing
 git clone <repo-url>
 cd document-intelligence-refinery
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+# Install with uv (creates .venv automatically)
+uv sync --extra dev
 
-# Install dependencies
-pip install -e ".[dev]"
+# Or install all optional dependencies (dev + google + rag)
+uv sync --all-extras
 ```
 
 ### Configuration
@@ -76,16 +88,22 @@ export GOOGLE_API_KEY="your-key-here"
 
 ```bash
 # Process a single document
-python main.py --input data/CBE\ ANNUAL\ REPORT\ 2023-24.pdf
+uv run python main.py --input data/CBE\ ANNUAL\ REPORT\ 2023-24.pdf
 
 # Process entire corpus
-python main.py --input data/
+uv run python main.py --input data/
 
 # Process with max document limit
-python main.py --input data/ --max-docs 12
+uv run python main.py --input data/ --max-docs 12
 
 # Custom output directory
-python main.py --input data/ --output .refinery/
+uv run python main.py --input data/ --output .refinery/
+
+# Interactive query mode (after processing)
+uv run python main.py --input data/report.pdf --query "What was total revenue in 2023?"
+
+# Verify a claim against source documents
+uv run python main.py --input data/report.pdf --verify "Revenue increased by 15%"
 ```
 
 ### Output Structure
@@ -96,13 +114,17 @@ python main.py --input data/ --output .refinery/
 │   ├── cbe_annual_report_2023_24.json
 │   └── ...
 ├── extraction_ledger.jsonl      # One JSON line per processed document
-└── pageindex/                   # PageIndex trees (final submission)
+├── pageindex/                   # PageIndex trees (hierarchical JSON)
+│   ├── cbe_annual_report_2023_24_pageindex.json
+│   └── ...
+├── chunks/                      # Validated semantic chunks
+└── qa_examples/                 # Q&A examples with provenance
 ```
 
 ### Running Tests
 
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ## Extraction Rules
@@ -124,7 +146,7 @@ document-intelligence-refinery/
 ├── main.py                          # Pipeline entry point
 ├── pyproject.toml                   # Dependencies & project config
 ├── README.md                        # This file
-├── Report.md                        # Interim submission report
+├── Report.md                        # Final submission report
 ├── rubric/
 │   └── extraction_rules.yaml       # Externalized configuration
 ├── src/
@@ -136,20 +158,29 @@ document-intelligence-refinery/
 │   │   └── provenance.py           # ProvenanceChain + BoundingBox
 │   ├── agents/
 │   │   ├── triage.py               # Triage Agent (Phase 1)
-│   │   └── extractor.py            # ExtractionRouter (Phase 2)
+│   │   ├── extractor.py            # ExtractionRouter (Phase 2)
+│   │   ├── chunker.py              # ChunkingEngine (Phase 3)
+│   │   ├── indexer.py              # PageIndexBuilder (Phase 4)
+│   │   └── query_agent.py          # QueryAgent (Phase 5)
 │   ├── strategies/
 │   │   ├── base.py                 # BaseExtractor interface
 │   │   ├── fast_text.py            # Strategy A: FastTextExtractor
 │   │   ├── layout_extractor.py     # Strategy B: LayoutExtractor
 │   │   └── vision_extractor.py     # Strategy C: VisionExtractor
-│   └── tools/                      # Utility functions
-├── tests/                           # Unit tests
+│   └── tools/
+│       ├── __init__.py
+│       └── query_tools.py          # VectorStore, FactTable, AuditMode
+├── scripts/
+│   ├── generate_profiles.py         # Batch profile generation
+│   └── generate_final_artifacts.py  # PageIndex + Q&A artifact generation
+├── tests/                           # Unit tests (54 tests)
 ├── data/                            # PDF corpus (not committed)
 ├── .refinery/                       # Pipeline outputs
 │   ├── profiles/
 │   ├── extraction_ledger.jsonl
 │   └── pageindex/
-└── docs/                            # Additional documentation
+└── docs/
+    └── VIDEO_DEMO_SCRIPT.md         # 5-minute demo script
 ```
 
 ## License
