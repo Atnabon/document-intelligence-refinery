@@ -1,10 +1,19 @@
 """Strategy C: Vision Model Extractor.
 
-Most expensive but most capable strategy. Renders each page as an image and
-sends it to a vision-language model (GPT-4o / Gemini) for structured extraction.
+Most capable strategy for scanned/complex documents. Supports two modes:
+
+1. **Ollama mode (default, free, local)**: Sends rendered page images to a
+   local Ollama server running kimi-k2.5:cloud. No API key, no cost.
+   Requires: `ollama pull kimi-k2.5:cloud && ollama serve`
+2. **OpenAI/Google mode (optional, paid)**: Sends rendered page images to
+   GPT-4o or Gemini Flash via OpenRouter. Higher cost but cloud-hosted.
+
+The strategy sends rendered page images to the configured VLM for structured
+text extraction. If VLM is unavailable, it falls back to PyMuPDF basic text
+extraction as a last resort.
 
 Best for: Scanned documents, complex visual layouts, diagrams, handwritten text.
-Cost: ~$0.01 per page (VLM API call).
+Cost: $0.00/page (Ollama local) or ~$0.01/page (OpenAI/Google API).
 """
 
 from __future__ import annotations
@@ -29,22 +38,27 @@ logger = logging.getLogger(__name__)
 
 
 class VisionExtractor(BaseExtractor):
-    """Strategy C: VLM-based extraction for scanned/complex documents.
+    """Strategy C: Vision model extraction for scanned/complex documents.
+
+    Primary VLM: Ollama kimi-k2.5:cloud (free, local, requires `ollama serve`)
+    Cloud VLM: OpenAI GPT-4o or Google Gemini (paid, optional)
+    Last resort: PyMuPDF basic text extraction
 
     Pros:
-    - Works on scanned documents (no text stream needed)
-    - Understands complex visual layouts, diagrams, charts
-    - Best table extraction accuracy
+    - Ollama VLM handles complex layouts locally with kimi-k2.5:cloud
+    - Structured JSON output with table detection and bbox estimation
+    - Budget guard prevents cost overruns (relevant for cloud APIs only)
 
     Cons:
-    - Expensive (~$0.01+ per page)
-    - Slow (1–3 seconds per page)
-    - Requires API key (OPENAI_API_KEY or GOOGLE_API_KEY)
+    - Ollama requires local Ollama server with kimi-k2.5:cloud model pulled
+    - Cloud APIs (OpenAI/Google) require API keys and cost ~$0.01/page
+    - Slower than text extraction (~1-2 pages/sec)
     """
 
     # VLM provider configuration
-    DEFAULT_PROVIDER = "openai"  # or "google"
-    DEFAULT_MODEL = "gpt-4o"
+    DEFAULT_PROVIDER = "ollama"  # "ollama" | "openai" | "google"
+    DEFAULT_MODEL = "kimi-k2.5:cloud"
+    DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
     MAX_RETRIES = 3
     RENDER_DPI = 200  # DPI for page rendering
     DEFAULT_BUDGET_CAP_USD = 2.0  # Halt processing when this amount is exceeded
@@ -66,14 +80,19 @@ Return ONLY valid JSON array, no other text."""
         provider: str | None = None,
         model: str | None = None,
         budget_cap_usd: float | None = None,
+        ollama_base_url: str | None = None,
     ):
         """Initialize with VLM provider configuration and optional budget cap.
 
         Args:
-            provider: VLM provider ("openai" or "google"). Reads VLM_PROVIDER env var.
-            model: Model name. Reads VLM_MODEL env var.
+            provider: VLM provider. One of "ollama" (default), "openai", "google".
+                      Reads VLM_PROVIDER env var.
+            model: Model name. For Ollama: "kimi-k2.5:cloud". Reads VLM_MODEL env var.
             budget_cap_usd: Hard cost cap in USD. Processing halts when exceeded.
+                            Relevant for cloud providers only (Ollama is free).
                             Defaults to DEFAULT_BUDGET_CAP_USD.
+            ollama_base_url: Ollama server base URL. Reads OLLAMA_BASE_URL env var.
+                             Defaults to http://localhost:11434/v1
         """
         self.provider = provider or os.getenv("VLM_PROVIDER", self.DEFAULT_PROVIDER)
         self.model = model or os.getenv("VLM_MODEL", self.DEFAULT_MODEL)
@@ -81,12 +100,19 @@ Return ONLY valid JSON array, no other text."""
             budget_cap_usd if budget_cap_usd is not None
             else self.DEFAULT_BUDGET_CAP_USD
         )
+        self.ollama_base_url = (
+            ollama_base_url
+            or os.getenv("OLLAMA_BASE_URL", self.DEFAULT_OLLAMA_BASE_URL)
+        )
 
     def name(self) -> str:
         return "vision_model"
 
     def cost_per_page(self) -> float:
-        return 0.01
+        """Return cost per page in USD. Free for local Ollama provider."""
+        if self.provider in ("ollama",):
+            return 0.0  # local inference — no cost
+        return 0.01  # cloud APIs (openai, google)
 
     def extract(
         self,
@@ -94,10 +120,13 @@ Return ONLY valid JSON array, no other text."""
         pdf_path: str | Path,
         pages: Optional[list[int]] = None,
     ) -> List[LDU]:
-        """Extract content by rendering pages as images and sending to VLM.
+        """Extract content from scanned/complex pages using VLM.
 
-        Processing halts when cumulative cost exceeds budget_cap_usd.
-        Falls back to OCR-based extraction if VLM is unavailable.
+        Extraction approach:
+        1. VLM (Ollama kimi-k2.5:cloud by default) — free for local, paid for cloud
+        2. PyMuPDF basic text extraction — free fallback if VLM unavailable
+
+        Processing halts when cumulative cost exceeds budget_cap_usd (cloud VLM only).
         """
         pdf_path = Path(pdf_path)
         doc = fitz.open(str(pdf_path))
@@ -111,7 +140,10 @@ Return ONLY valid JSON array, no other text."""
             if page_idx < 0 or page_idx >= len(doc):
                 continue
 
-            # ── Budget cap enforcement ────────────────────────────────
+            page = doc[page_idx]
+            page_number = page_idx + 1
+
+            # ── Budget cap enforcement (VLM) ─────────────────────────
             if cumulative_cost + cost_per_page > self.budget_cap_usd:
                 logger.warning(
                     "VisionExtractor: Budget cap $%.2f reached after %d pages "
@@ -120,10 +152,12 @@ Return ONLY valid JSON array, no other text."""
                     page_idx,
                     cumulative_cost,
                 )
-                break
-
-            page = doc[page_idx]
-            page_number = page_idx + 1
+                # Fall back to basic text for remaining pages
+                page_ldus = self._extract_page_ocr_fallback(
+                    profile, page, page_number
+                )
+                ldus.extend(page_ldus)
+                continue
 
             try:
                 page_ldus = self._extract_page_with_vlm(
@@ -133,11 +167,11 @@ Return ONLY valid JSON array, no other text."""
                 cumulative_cost += cost_per_page
             except Exception as e:
                 logger.warning(
-                    "VLM extraction failed for page %d, falling back to OCR: %s",
+                    "VLM extraction failed for page %d, falling back to basic text: %s",
                     page_number,
                     str(e),
                 )
-                # Fallback: try basic OCR via PyMuPDF (no additional cost)
+                # Fallback: basic text via PyMuPDF (no additional cost)
                 page_ldus = self._extract_page_ocr_fallback(
                     profile, page, page_number
                 )
@@ -145,7 +179,7 @@ Return ONLY valid JSON array, no other text."""
 
         doc.close()
         logger.info(
-            "VisionExtractor: Extracted %d LDUs from %s (cost $%.4f / cap $%.2f)",
+            "VisionExtractor: Extracted %d LDUs from %s (VLM cost $%.4f / cap $%.2f)",
             len(ldus),
             pdf_path.name,
             cumulative_cost,
@@ -181,16 +215,64 @@ Return ONLY valid JSON array, no other text."""
         return pix.tobytes("png")
 
     def _call_vlm(self, image_b64: str) -> str:
-        """Call the VLM API with the page image.
+        """Call the VLM with the page image.
 
-        Supports OpenAI and Google Gemini providers.
+        Supports Ollama (local, free), OpenAI, and Google Gemini providers.
         """
-        if self.provider == "openai":
+        if self.provider == "ollama":
+            return self._call_ollama(image_b64)
+        elif self.provider == "openai":
             return self._call_openai(image_b64)
         elif self.provider == "google":
             return self._call_google(image_b64)
         else:
             raise ValueError(f"Unknown VLM provider: {self.provider}")
+
+    def _call_ollama(self, image_b64: str) -> str:
+        """Call a local Ollama server using the OpenAI-compatible API.
+
+        Requires Ollama running locally with the model already pulled:
+            ollama pull kimi-k2.5:cloud
+            ollama serve
+
+        Uses the OpenAI Python client pointed at localhost:11434/v1.
+        No API key needed — passes the string "ollama" as a placeholder.
+        """
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(
+                base_url=self.ollama_base_url,
+                api_key="ollama",  # required by client but not validated by Ollama
+            )
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": self.EXTRACTION_PROMPT},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_b64}",
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=4096,
+                temperature=0.0,
+            )
+            return response.choices[0].message.content
+        except ImportError:
+            raise RuntimeError(
+                "openai package not installed. Run: uv add openai"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Ollama API call failed (is `ollama serve` running?): {e}"
+            )
 
     def _call_openai(self, image_b64: str) -> str:
         """Call OpenAI Vision API."""
