@@ -3,6 +3,8 @@
 Usage:
     python main.py --input <pdf_path_or_directory>
     python main.py --input data/ --output .refinery/
+    python main.py --input data/file.pdf --query "What is the total revenue?"
+    python main.py --input data/file.pdf --verify "Revenue was $4.2B in Q3"
 """
 
 from __future__ import annotations
@@ -15,6 +17,10 @@ from pathlib import Path
 
 from src.agents.extractor import ExtractionRouter
 from src.agents.triage import TriageAgent
+from src.agents.chunker import ChunkingEngine
+from src.agents.indexer import PageIndexBuilder
+from src.agents.query_agent import QueryAgent
+from src.tools.query_tools import FactTable, VectorStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,8 +45,11 @@ def process_document(
     output_dir: Path,
     triage_agent: TriageAgent,
     router: ExtractionRouter,
+    chunker: ChunkingEngine,
+    indexer: PageIndexBuilder,
+    query_agent: QueryAgent,
 ) -> None:
-    """Process a single PDF through the full pipeline."""
+    """Process a single PDF through the full 5-stage pipeline."""
     logger.info("=" * 60)
     logger.info("Processing: %s", pdf_path.name)
     logger.info("=" * 60)
@@ -63,7 +72,6 @@ def process_document(
     ledger_path = output_dir / "extraction_ledger.jsonl"
     router.append_to_ledger(result.ledger_entry, ledger_path)
 
-    # Print summary
     logger.info("Strategy: %s", result.metrics.strategy_used)
     logger.info("LDUs extracted: %d", len(result.ldus))
     logger.info("Tables found: %d", result.ledger_entry.table_count)
@@ -78,6 +86,30 @@ def process_document(
             pdf_path.name,
             result.metrics.average_confidence,
         )
+
+    # ── Phase 3: Semantic Chunking ────────────────────────────────────
+    chunked_ldus = chunker.chunk(result.ldus)
+    result.ldus = chunked_ldus
+    logger.info("Chunked LDUs: %d (from %d raw)", len(chunked_ldus), len(result.ldus))
+
+    # ── Phase 4: PageIndex Building ───────────────────────────────────
+    page_index = indexer.build(
+        document_id=profile.document_id,
+        ldus=chunked_ldus,
+        document_title=profile.filename,
+        generate_summaries=True,
+    )
+    result.page_index = page_index
+    indexer.save(page_index)
+    logger.info(
+        "PageIndex: %d sections, depth %d",
+        page_index.total_sections,
+        page_index.max_depth,
+    )
+
+    # ── Phase 5: Register with Query Agent ────────────────────────────
+    query_agent.register_document(result, page_index)
+    logger.info("Document registered with Query Agent")
 
 
 def main():
@@ -111,6 +143,19 @@ def main():
         default=None,
         help="Maximum number of documents to process.",
     )
+    parser.add_argument(
+        "--query",
+        "-q",
+        type=str,
+        default=None,
+        help="Ask a question about the processed document(s).",
+    )
+    parser.add_argument(
+        "--verify",
+        type=str,
+        default=None,
+        help="Verify a claim against the processed document(s).",
+    )
 
     args = parser.parse_args()
     input_path = Path(args.input)
@@ -120,9 +165,12 @@ def main():
     # Load config
     config = load_config(config_path)
 
-    # Initialize agents
+    # Initialize all agents
     triage_agent = TriageAgent(config=config)
     router = ExtractionRouter(config=config)
+    chunker = ChunkingEngine(config=config)
+    indexer = PageIndexBuilder(config=config)
+    query_agent = QueryAgent(config=config)
 
     # Collect PDF files
     if input_path.is_file() and input_path.suffix.lower() == ".pdf":
@@ -141,12 +189,52 @@ def main():
     # Process each document
     for pdf_file in pdf_files:
         try:
-            process_document(pdf_file, output_dir, triage_agent, router)
+            process_document(
+                pdf_file, output_dir, triage_agent, router,
+                chunker, indexer, query_agent,
+            )
         except Exception as e:
             logger.error("Failed to process %s: %s", pdf_file.name, str(e))
             continue
 
     logger.info("Pipeline complete. Output: %s", output_dir)
+
+    # Handle query mode
+    if args.query:
+        logger.info("=" * 60)
+        logger.info("Query Mode")
+        logger.info("=" * 60)
+        result = query_agent.query(args.query)
+        print("\n" + "=" * 60)
+        print(f"Question: {args.query}")
+        print("=" * 60)
+        print(f"\nAnswer:\n{result['answer']}")
+        if result.get("provenance_chain"):
+            print(f"\nProvenance:")
+            chain = result["provenance_chain"]
+            print(f"  Document: {chain.get('document_name', 'N/A')}")
+            for citation in chain.get("citations", []):
+                print(f"  - Page {citation.get('page_number', '?')}: {citation.get('text_snippet', '')[:100]}...")
+            print(f"  Confidence: {chain.get('confidence', 0):.2f}")
+            print(f"  Status: {chain.get('verification_status', 'unknown')}")
+
+    # Handle verify mode
+    if args.verify:
+        logger.info("=" * 60)
+        logger.info("Audit Mode — Claim Verification")
+        logger.info("=" * 60)
+        for doc_id in query_agent._documents:
+            result = query_agent.verify_claim(args.verify, doc_id)
+            print("\n" + "=" * 60)
+            print(f"Claim: {args.verify}")
+            print(f"Document: {doc_id}")
+            print("=" * 60)
+            print(f"Status: {result['verification_status']}")
+            print(f"Confidence: {result['confidence']:.2f}")
+            if result.get("provenance_chain"):
+                chain = result["provenance_chain"]
+                for citation in chain.get("citations", []):
+                    print(f"  - Page {citation.get('page_number', '?')}: {citation.get('text_snippet', '')[:100]}")
 
 
 if __name__ == "__main__":
