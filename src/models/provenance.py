@@ -7,6 +7,7 @@ PDF where it appears.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -103,3 +104,43 @@ class ProvenanceChain(BaseModel):
                 "verification_status": "verified",
             }
         }
+
+
+class AuditRecord(BaseModel):
+    """A record of an audit/verification action for compliance tracking.
+
+    Each time a claim is verified or a document is queried in audit mode,
+    an AuditRecord is created for the audit trail.
+    """
+
+    record_id: str = Field(
+        ..., description="Unique identifier for this audit record."
+    )
+    timestamp: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the audit action occurred.",
+    )
+    action: str = Field(
+        ..., description="Action performed: 'verify_claim', 'query', 'review'."
+    )
+    document_id: str = Field(
+        ..., description="Document that was audited."
+    )
+    claim_or_query: str = Field(
+        ..., description="The claim verified or question asked."
+    )
+    result: str = Field(
+        default="", description="Result summary: verified/unverified/unverifiable."
+    )
+    confidence: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Confidence of the verification result.",
+    )
+    provenance_chain_id: Optional[str] = Field(
+        default=None,
+        description="ID of the associated ProvenanceChain, if any.",
+    )
+    reviewer: str = Field(
+        default="system",
+        description="Who performed the audit: 'system' or a user identifier.",
+    )

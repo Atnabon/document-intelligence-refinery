@@ -48,6 +48,15 @@ class ExtractionStrategy(str, Enum):
     STRATEGY_C = "vision_model"  # VLM‑based (GPT‑4o / Gemini vision)
 
 
+class ExtractionCost(str, Enum):
+    """Estimated extraction cost tier."""
+
+    FAST_TEXT_SUFFICIENT = "fast_text_sufficient"   # Strategy A adequate
+    LAYOUT_RECOMMENDED = "layout_recommended"       # Strategy B recommended
+    VISION_REQUIRED = "vision_required"             # Strategy C required
+    MIXED_STRATEGY = "mixed_strategy"               # Per-page strategy mix
+
+
 class DocumentProfile(BaseModel):
     """Profile produced by the Triage Agent for every ingested document.
 

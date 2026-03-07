@@ -6,9 +6,50 @@ enabling section-specific queries *without* relying on vector similarity search.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+
+class DataType(str, Enum):
+    """Types of data content found in a section."""
+
+    TEXT = "text"
+    TABLE = "table"
+    FIGURE = "figure"
+    EQUATION = "equation"
+    CODE = "code"
+    LIST = "list"
+    CHART = "chart"
+    FOOTNOTE = "footnote"
+
+
+class EntityType(str, Enum):
+    """Types of named entities detected in content."""
+
+    PERSON = "person"
+    ORGANIZATION = "organization"
+    DATE = "date"
+    MONEY = "money"
+    PERCENTAGE = "percentage"
+    LOCATION = "location"
+    PRODUCT = "product"
+    LAW = "law"
+    REGULATION = "regulation"
+    METRIC = "metric"
+
+
+class ExtractedEntity(BaseModel):
+    """A named entity extracted from document content."""
+
+    text: str = Field(..., description="The entity text as it appears.")
+    entity_type: EntityType = Field(..., description="Classification of the entity.")
+    page_number: int = Field(default=1, ge=1, description="Page where entity was found.")
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Detection confidence.")
+
+    class Config:
+        use_enum_values = True
 
 
 class PageNode(BaseModel):

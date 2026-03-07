@@ -153,13 +153,17 @@ chunking:
 
 # ── VLM Configuration ────────────────────────────────────────────────────
 vlm:
-  provider: "openai"  # or "google"
-  model: "gpt-4o"
+  # Local Ollama server (free, no API key required).
+  # Start with: ollama pull kimi-k2.5:cloud && ollama serve
+  # To use OpenAI instead: set provider to "openai" and set OPENAI_API_KEY env var.
+  provider: "ollama"
+  model: "kimi-k2.5:cloud"
+  base_url: "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
   render_dpi: 200
   max_tokens: 4096
   temperature: 0.0
   max_retries: 3
-  # Hard budget cap for Strategy C: processing halts when this USD amount is reached
+  # Hard budget cap for cloud APIs (openai/google) — irrelevant for Ollama ($0.00)
   budget_cap_usd: 2.0
 
 # ── Output Configuration ─────────────────────────────────────────────────
