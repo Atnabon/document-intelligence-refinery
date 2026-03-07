@@ -39,24 +39,24 @@ logger = logging.getLogger("generate_artifacts")
 
 CORPUS = {
     "A": [  # Financial Reports (native digital)
-        "CBE ANNUAL REPORT 2023-24.pdf",
-        "Annual Report JUNE 2023.pdf",
-        "Annual Report JUNE 2022.pdf",
+        "CBE Annual Report 2023-24.pdf",
+        "Annual_Report_JUNE-2023.pdf",
+        "Annual_Report_JUNE-2022.pdf",
     ],
     "B": [  # Scanned Government/Legal (image-based)
         "Audit Report - 2023.pdf",
-        "Audited Financial Statement 2018.pdf",
-        "Audited Financial Statement 2019.pdf",
+        "2018_Audited_Financial_Statement_Report.pdf",
+        "2019_Audited_Financial_Statement_Report.pdf",
     ],
     "C": [  # Technical Assessment Reports (mixed)
         "fta_performance_survey_final_report_2022.pdf",
-        "Pharmaceutical Manufacturing in Ethiopia.pdf",
-        "Security Vulnerability Disclosure Policy Framework.pdf",
+        "20191010_Pharmaceutical-Manufacturing-Opportunites-in-Ethiopia_VF.pdf",
+        "Security_Vulnerability_Disclosure_Standard_Procedure_1.pdf",
     ],
     "D": [  # Structured Data Reports (table-heavy)
         "tax_expenditure_ethiopia_2021_22.pdf",
-        "Consumer Price Index Aug_2025.pdf",
-        "Consumer Price Index Jul_2025.pdf",
+        "Consumer Price Index August 2025.pdf",
+        "Consumer Price Index July 2025.pdf",
     ],
 }
 
