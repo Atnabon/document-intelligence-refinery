@@ -53,6 +53,14 @@ class PageNode(BaseModel):
         default_factory=list,
         description="LDU IDs that belong to this section.",
     )
+    key_entities: List[str] = Field(
+        default_factory=list,
+        description="Named entities extracted from this section (organizations, amounts, dates).",
+    )
+    data_types_present: List[str] = Field(
+        default_factory=list,
+        description="Types of data found in this section (e.g., 'table', 'figure', 'list', 'equation').",
+    )
     metadata: Dict[str, str] = Field(
         default_factory=dict,
         description="Arbitrary metadata (e.g., section_type, importance).",
@@ -108,6 +116,8 @@ class PageIndex(BaseModel):
                             "summary": "Key financial metrics and KPIs.",
                             "children": [],
                             "ldu_ids": ["cbe_p5_001", "cbe_p6_001"],
+                            "key_entities": ["CBE", "ETB 2.1 trillion", "FY 2023-24"],
+                            "data_types_present": ["table", "key_value"],
                             "metadata": {"section_type": "financial"},
                         }
                     ],
