@@ -87,6 +87,15 @@ class LDU(BaseModel):
         description="IDs of child LDUs.",
     )
 
+    # ── Cross-references ─────────────────────────────────────────────
+    cross_references: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Resolved cross-reference targets (e.g., ['table_ldu_003', 'figure_ldu_007']). "
+            "Populated by the ChunkingEngine when patterns like 'see Table 3' are detected."
+        ),
+    )
+
     # ── Extraction Metadata ───────────────────────────────────────────
     extraction_strategy: str = Field(
         ..., description="Which strategy produced this LDU."
@@ -101,6 +110,11 @@ class LDU(BaseModel):
         default=0,
         ge=0,
         description="Reading-order index within the page.",
+    )
+    token_count: int = Field(
+        default=0,
+        ge=0,
+        description="Approximate token count (word-level) for this LDU.",
     )
 
     class Config:
@@ -129,8 +143,10 @@ class LDU(BaseModel):
                 "section_heading": "Financial Statements",
                 "parent_ldu_id": None,
                 "child_ldu_ids": [],
+                "cross_references": [],
                 "extraction_strategy": "layout_aware",
                 "confidence": 0.92,
                 "sequence_index": 3,
+                "token_count": 45,
             }
         }
